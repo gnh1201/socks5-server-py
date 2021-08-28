@@ -131,8 +131,8 @@ class Socks5Server:
                 dst_addr = ':'.join(tmp_addr)
 
             if not address_type:
-                return dest_host, dest_port
-            
+                raise Exception('This is not a type of address')
+
             dst_port = chr_to_int(dst_port[0]) * 256 + chr_to_int(dst_port[1])
             server_sock = sock
             server_ip = ''.join([chr(int(i)) for i in socket.gethostbyname(self.host).split('.')])
@@ -154,6 +154,8 @@ class Socks5Server:
                 sock.close()
         except KeyboardInterrupt as e:
             self.logger.error('Error in SOCKS5 establishment: %s' % e)
+        except Exception as e:
+            self.logger.warning('Error in SOCKS5 establishment: %s' % e)
 
         return dest_host, dest_port
 
@@ -256,4 +258,3 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     main(args)
-
