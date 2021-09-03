@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
-""" socks5_server
+""" socks5_server (with relay server)
 
 Supports both python 2 and 3.
 """
 
-__author__ = "Caleb Madrigal"
-__date__ = '2016-10-17'
+__author__ = "@gnh1201, @veryplay, Caleb Madrigal @calebmadrigal"
+__date__ = '2021-09-03'
 
 import sys
 import argparse
@@ -46,7 +46,6 @@ CMD_TYPE_CONNECT = b'\x01'
 CMD_TYPE_TCP_BIND = b'\x02'
 CMD_TYPE_UDP = b'\x03'
 
-
 def make_logger(log_path=None, log_level_str='INFO'):
     formatter = logging.Formatter('%(asctime)s: %(name)s (%(levelname)s): %(message)s')
     if log_path:
@@ -60,11 +59,12 @@ def make_logger(log_path=None, log_level_str='INFO'):
     logger.setLevel(log_level)
     return logger
 
-
-class Socks5Server:
-    def __init__(self, host, port, logger, backlog=128):
+class Socks5Server(Thread):
+    def __init__(self, host, port, relay_port, logger, backlog=128):
+        super().__init__()
         self.host = host
         self.port = port
+        self.relay_port = relay_port
         self.logger = logger
         self.backlog = backlog
         self.client_dest_map_lock = threading.Lock()
@@ -72,6 +72,7 @@ class Socks5Server:
         self.client_dest_map = {}
         # Maps from sock -> buffer to send to sock
         self.sock_send_buffers = {}
+        self.relay_server_socks = []
 
     def buffer_receive(self, sock):
         """ Reads into the buffer for the corresponding relay socket. """
@@ -99,6 +100,7 @@ class Socks5Server:
         with self.client_dest_map_lock:
             partner_sock = self.client_dest_map.pop(sock)
             self.client_dest_map.pop(partner_sock)
+
         try:
             partner_sock.send(self.sock_send_buffers.pop(partner_sock, b''))
             partner_sock.close()
@@ -172,6 +174,7 @@ class Socks5Server:
             return None
 
         self.logger.debug('Trying to connect to destination: %s:%d' % (dest_host, dest_port))
+
         dest_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         dest_sock.settimeout(RESEND_TIMEOUT)
         try:
@@ -188,16 +191,23 @@ class Socks5Server:
         client_sock.settimeout(RESEND_TIMEOUT)
         client_sock.setblocking(0)
         dest_sock.setblocking(0)
-
+        
         with self.client_dest_map_lock:
             self.client_dest_map[client_sock] = dest_sock
             self.client_dest_map[dest_sock] = client_sock
-        self.logger.info('SOCKS5 proxy from %s:%d to %s:%d established' %
-                         (addr[0], addr[1], dest_host, dest_port))
 
     def accept_connection(self):
         (client, addr) = self.server_sock.accept()
         t = threading.Thread(target=self.handle_connect_thread, args=(client, addr))
+        t.daemon = True
+        t.start()
+
+    def handle_relay_connect_thread(self, relay_sock, addr):
+        relay_server_socks.append(relay_sock)
+
+    def accept_relay_connection(self):
+        (client, addr) = self.relay_server_sock.accept()
+        t = threading.Thread(target=self.handle_relay_connect_thread, args=(client, addr))
         t.daemon = True
         t.start()
 
@@ -207,15 +217,24 @@ class Socks5Server:
         self.server_sock.listen(self.backlog)
         self.logger.info('Serving on %s:%d' % (self.host, self.port))
 
+        self.relay_server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.relay_server_sock.bind((self.host, self.relay_port))
+        self.relay_server_sock.listen(self.backlog)
+        self.logger.info('Relaying on %s:%d' % (self.host, self.port))
+
         while True:
             connected_sockets = list(self.client_dest_map.keys())
-            in_socks = [self.server_sock] + connected_sockets
+
+            in_socks = [self.server_sock, self.relay_server_sock] + connected_sockets
             out_socks = connected_sockets
+
             in_ready, out_ready, err_ready = select.select(in_socks, out_socks, [], 0.1)
 
             for sock in in_ready:
                 if sock == self.server_sock:
                     self.accept_connection()
+                elif sock == self.relay_server_sock:
+                    self.accept_relay_connection()
                 else:
                     try:
                         self.buffer_receive(sock)
@@ -237,13 +256,17 @@ class Socks5Server:
                     sys.exit(1)
                 else:
                     self.flush_and_close_sock_pair(sock, 'Unknown socket error')
+                    
+    def relay_forever():
+        pass
 
+    def run(self):
+        self.serve_forever()
 
 def main(args):
     logger = make_logger(log_path=args.log_path, log_level_str=args.log_level)
-    socks5_server = Socks5Server(args.host, args.port, logger)
-    socks5_server.serve_forever()
-
+    socks5_server = Socks5Server(args.host, args.port, args.relay_port, logger)
+    socks5_server.start()
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -251,6 +274,8 @@ if __name__ == '__main__':
                         help='IP/Hostname to serve on', type=str)
     parser.add_argument('-p', '--port', action='store', default=1080,
                         help='Port to serve on', type=int)
+    parser.add_argument('-r', '--relay-port', action='store', default=1090,
+                        help='Port to relay on', type=int)
     parser.add_argument('--log-path', action='store', default=None,
                         help='DEBUG, INFO, WARNING, ERROR, or CRITICAL', type=str)
     parser.add_argument('--log-level', action='store', default='INFO',
